@@ -1,0 +1,63 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cursor-codex-router"
+version = "1.0.0"
+description = "OpenAI-compatible local router that fronts the Cursor agent CLI for Codex"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [{ name = "Daniel" }]
+keywords = ["cursor", "codex", "openai", "router", "agent"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Libraries",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/DaniEnsi/cursor-codex-router"
+Repository = "https://github.com/DaniEnsi/cursor-codex-router"
+Issues = "https://github.com/DaniEnsi/cursor-codex-router/issues"
+
+[project.scripts]
+cursor-codex-router = "cursor_codex_router.cli:main"
+cursor-codex-sync-model-catalog = "cursor_codex_router.catalog:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cursor_codex_router"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/src",
+  "/systemd",
+  "/tests",
+  "/README.md",
+  "/LICENSE",
+  "/pyproject.toml",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP"]
+ignore = ["E501"]

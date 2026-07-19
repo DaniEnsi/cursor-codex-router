@@ -1,0 +1,22 @@
+[Unit]
+Description=Cursor→Codex OpenAI-compatible local router
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=HOME=%h
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=CURSOR_CODEX_ROUTER_HOST=127.0.0.1
+Environment=CURSOR_CODEX_ROUTER_PORT=18789
+Environment=CURSOR_CODEX_ROUTER_DEFAULT_MODEL=auto
+WorkingDirectory=%h
+# Prefer the console script after `pip install`:
+ExecStart=%h/.local/bin/cursor-codex-router serve
+Restart=on-failure
+RestartSec=3
+StandardOutput=append:%h/.local/share/cursor-codex-router/service.log
+StandardError=append:%h/.local/share/cursor-codex-router/service.log
+
+[Install]
+WantedBy=default.target
