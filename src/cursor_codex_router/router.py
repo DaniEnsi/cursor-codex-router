@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import signal
 import subprocess
 import threading
@@ -29,14 +28,13 @@ from typing import Any
 from urllib.parse import urlparse
 
 from . import paths as P
+from .effort_map import EffortMap, FileEffortMapStore, MemoryEffortMapStore
 from .model_identity import TO_CODEX as CURSOR_TO_CODEX_EFFORT
 from .model_identity import parse_agent_models, peel_agent_model
 from .tool_bridge import (
     backend_system,
     compact_tools,
-    extract_cwd,
     format_tools_for_prompt,
-    parse_tool_calls,
 )
 
 HOST = P.host()
@@ -147,26 +145,24 @@ def catalog_model_ids() -> list[str]:
     return list_models()
 
 
-def _effort_map_path() -> Path:
-    return P.effort_map_path()
+_effort_store: FileEffortMapStore | MemoryEffortMapStore | None = None
 
 
-def load_effort_map(force: bool = False) -> dict[str, Any]:
-    cache = getattr(load_effort_map, "_cache", {"ts": 0.0, "data": {}})
-    now = time.time()
-    if not force and cache["data"] and now - cache["ts"] < 30:
-        return cache["data"]
-    path = _effort_map_path()
-    data: dict[str, Any] = {}
-    if path.exists():
-        try:
-            data = json.loads(path.read_text())
-        except Exception as e:
-            log("effort_map_error", error=str(e))
-    cache["ts"] = now
-    cache["data"] = data
-    load_effort_map._cache = cache  # type: ignore[attr-defined]
-    return data
+def set_effort_map_store(store: FileEffortMapStore | MemoryEffortMapStore | None) -> None:
+    """Test seam: inject MemoryEffortMapStore or reset to default file store."""
+    global _effort_store
+    _effort_store = store
+
+
+def _get_effort_store() -> FileEffortMapStore | MemoryEffortMapStore:
+    global _effort_store
+    if _effort_store is None:
+        _effort_store = FileEffortMapStore(P.effort_map_path())
+    return _effort_store
+
+
+def load_effort_map(force: bool = False) -> EffortMap:
+    return _get_effort_store().load(force=force)
 
 
 def extract_reasoning_effort(body: dict[str, Any] | None) -> str | None:
@@ -262,6 +258,8 @@ def resolve_model(model: str | None, body: dict[str, Any] | None = None) -> tupl
 
     # Body reasoning.effort always wins over any effort baked into the model id.
     effort = body_effort or suffix_effort
+    if effort:
+        effort = normalize_codex_effort(effort)
 
     info = emap.get(slug)
     if not info:
@@ -285,33 +283,8 @@ def resolve_model(model: str | None, body: dict[str, Any] | None = None) -> tupl
             return echo, agent
         return echo, slug
 
-    efforts = info.get("efforts") or {}
-    eff = (effort or info.get("default_effort") or "high").lower()
-    eff = normalize_codex_effort(eff) or info.get("default_effort") or "high"
-    if eff == "minimal":
-        eff = "low" if "low" in efforts else eff
-
-    slot = efforts.get(eff)
-    if not slot:
-        order = ["low", "medium", "high", "xhigh", "max", "ultra", "minimal"]
-        if eff in order:
-            i = order.index(eff)
-            for j in range(len(order)):
-                for cand in (order[min(len(order) - 1, i + j)], order[max(0, i - j)]):
-                    if cand in efforts:
-                        slot = efforts[cand]
-                        eff = cand
-                        break
-                if slot:
-                    break
-        if not slot:
-            slot = next(iter(efforts.values()))
-
-    if wants_fast and slot.get("fast"):
-        resolved = slot["fast"]
-    else:
-        resolved = slot.get("normal") or slot.get("fast")
-
+    resolved = emap.pick_agent(slug, effort, wants_fast)
+    eff = effort or info.default_effort or "high"
     if not resolved:
         resolved = slug if slug in known_set else DEFAULT_MODEL
 
@@ -496,7 +469,9 @@ def responses_input_to_prompt(
             },
         )
 
-    preamble = backend_system(nested=nested, bridge=bridge, has_tools=bool(compact) or (nested and has_tools))
+    preamble = backend_system(
+        nested=nested, bridge=bridge, has_tools=bool(compact) or (nested and has_tools)
+    )
     if compact:
         preamble = f"{preamble}\n\n{format_tools_for_prompt(compact)}"
 
@@ -527,7 +502,9 @@ def chat_messages_to_prompt(
 
     msgs = list(messages)
     if cwd is not None:
-        msgs = [{"role": "system", "content": f"Project working directory (Codex cwd): {cwd}"}] + msgs
+        msgs = [
+            {"role": "system", "content": f"Project working directory (Codex cwd): {cwd}"}
+        ] + msgs
 
     preamble = backend_system(nested=nested, bridge=bridge, has_tools=bool(compact))
     if compact:

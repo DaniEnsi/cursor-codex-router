@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -21,8 +20,7 @@ def _isolate_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(router, "WORKSPACE", tmp_path / "ws")
     monkeypatch.setattr(router, "_api_key_cache", None)
     monkeypatch.setattr(router, "_models_cache", {"ts": 0.0, "ids": []})
-    if hasattr(router.load_effort_map, "_cache"):
-        delattr(router.load_effort_map, "_cache")
+    router.set_effort_map_store(None)
 
 
 def test_peel_agent_model() -> None:
@@ -36,23 +34,43 @@ def test_peel_agent_model() -> None:
 
 
 def test_resolve_model_uses_effort_map(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    state = tmp_path / "state"
-    state.mkdir()
-    emap = {
-        "cursor-grok-4.5": {
-            "default_effort": "high",
-            "has_fast": True,
-            "efforts": {
-                "low": {"normal": "cursor-grok-4.5-low", "fast": "cursor-grok-4.5-low-fast"},
-                "high": {"normal": "cursor-grok-4.5-high", "fast": "cursor-grok-4.5-high-fast"},
-            },
+    from cursor_codex_router.effort_map import (
+        EffortMap,
+        EffortSlot,
+        MemoryEffortMapStore,
+        ModelEfforts,
+    )
+
+    emap = EffortMap(
+        {
+            "cursor-grok-4.5": ModelEfforts(
+                base="cursor-grok-4.5",
+                thinking=False,
+                default_effort="high",
+                has_fast=True,
+                efforts={
+                    "low": EffortSlot(
+                        normal="cursor-grok-4.5-low",
+                        fast="cursor-grok-4.5-low-fast",
+                    ),
+                    "high": EffortSlot(
+                        normal="cursor-grok-4.5-high",
+                        fast="cursor-grok-4.5-high-fast",
+                    ),
+                },
+            )
         }
-    }
-    (state / "model_effort_map.json").write_text(json.dumps(emap))
+    )
+    router.set_effort_map_store(MemoryEffortMapStore(emap))
     monkeypatch.setattr(
         router,
         "list_models",
-        lambda force=False: list(emap["cursor-grok-4.5"]["efforts"]["high"].values()),
+        lambda force=False: [
+            "cursor-grok-4.5-high",
+            "cursor-grok-4.5-high-fast",
+            "cursor-grok-4.5-low",
+            "cursor-grok-4.5-low-fast",
+        ],
     )
 
     echo, agent = router.resolve_model(

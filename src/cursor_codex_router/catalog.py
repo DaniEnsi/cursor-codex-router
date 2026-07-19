@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import paths as P
+from .effort_map import EffortMap, EffortSlot, FileEffortMapStore, ModelEfforts
 from .model_identity import TO_CODEX, parse_agent_models, split_model
 
 # Bump when catalog shape changes so Codex Desktop/app-server drops stale cache.
@@ -419,7 +420,7 @@ def load_template() -> dict:
     }
 
 
-def build() -> tuple[list[dict], dict]:
+def build() -> tuple[list[dict], EffortMap]:
     proc = subprocess.run([_agent(), "models"], text=True, capture_output=True)
     text = (proc.stdout or "") + "\n" + (proc.stderr or "")
     rows = parse_agent_models(text)
@@ -429,8 +430,7 @@ def build() -> tuple[list[dict], dict]:
     # group key: (catalog_slug, thinking)
     # catalog_slug = base or base+"-thinking"
     groups: dict[str, dict] = {}
-    # effort map: catalog_slug -> {codex_effort -> {normal: id, fast: id|None}}
-    effort_map: dict[str, dict] = {}
+    effort_map = EffortMap()
 
     for mid, name in rows:
         base, thinking, c_effort, fast = split_model(mid)
@@ -581,16 +581,19 @@ def build() -> tuple[list[dict], dict]:
                 }
             ]
         models.append(entry)
-        effort_map[slug] = {
-            "thinking": g["thinking"],
-            "base": g["base"],
-            "default_effort": default,
-            "has_fast": g["has_fast"],
-            "efforts": {
-                ce: {"normal": slot["normal"], "fast": slot["fast"]}
-                for ce, slot in by_codex.items()
-            },
-        }
+        effort_map.put(
+            slug,
+            ModelEfforts(
+                base=g["base"],
+                thinking=g["thinking"],
+                default_effort=default,
+                has_fast=g["has_fast"],
+                efforts={
+                    ce: EffortSlot(normal=slot["normal"], fast=slot["fast"])
+                    for ce, slot in by_codex.items()
+                },
+            ),
+        )
         priority += 1
 
     return models, effort_map
@@ -693,7 +696,7 @@ def main() -> int:
     }
     _out().parent.mkdir(parents=True, exist_ok=True)
     _out().write_text(json.dumps(catalog, indent=2) + "\n")
-    _map_out().write_text(json.dumps(effort_map, indent=2) + "\n")
+    FileEffortMapStore(_map_out()).save(effort_map)
     etag = write_models_cache(models, fetched_at)
     print(f"wrote {_out()} ({len(models)} base models)")
     print(f"wrote {_map_out()}")
