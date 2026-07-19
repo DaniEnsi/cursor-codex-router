@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import os
-import signal
 import subprocess
 import threading
 import time
@@ -28,6 +27,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from . import paths as P
+from .agent_runner import AgentRunner, AgentRunnerConfig, FakeAgentRunner
 from .effort_map import EffortMap, FileEffortMapStore, MemoryEffortMapStore
 from .model_identity import TO_CODEX as CURSOR_TO_CODEX_EFFORT
 from .model_identity import parse_agent_models, peel_agent_model
@@ -52,9 +52,8 @@ WORKSPACE = P.workspace_dir()
 
 _models_cache: dict[str, Any] = {"ts": 0.0, "ids": []}
 _log_lock = threading.Lock()
-_agent_slots = threading.BoundedSemaphore(MAX_CONCURRENT)
 _api_key_cache: str | None = None
-
+_agent_runner: AgentRunner | FakeAgentRunner | None = None
 # Back-compat alias for tests / older imports
 BACKEND_SYSTEM = backend_system(nested=False, bridge=False, has_tools=False)
 
@@ -512,22 +511,26 @@ def chat_messages_to_prompt(
     return messages_to_prompt(msgs, system_preamble=preamble)
 
 
-def _assistant_delta_text(obj: dict[str, Any]) -> str:
-    msg = obj.get("message")
-    if not isinstance(msg, dict):
-        return ""
-    content = msg.get("content")
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for p in content:
-            if isinstance(p, dict) and p.get("type") in (None, "text", "output_text"):
-                parts.append(str(p.get("text") or ""))
-            elif isinstance(p, str):
-                parts.append(p)
-        return "".join(parts)
-    return ""
+def set_agent_runner(runner: AgentRunner | FakeAgentRunner | None) -> None:
+    """Test seam: inject FakeAgentRunner or reset to default AgentRunner."""
+    global _agent_runner
+    _agent_runner = runner
+
+
+def get_agent_runner() -> AgentRunner | FakeAgentRunner:
+    global _agent_runner
+    if _agent_runner is None:
+        _agent_runner = AgentRunner(
+            AgentRunnerConfig(
+                agent_bin=AGENT_BIN,
+                workspace=WORKSPACE,
+                timeout=float(AGENT_TIMEOUT),
+                max_prompt_chars=MAX_PROMPT_CHARS,
+                max_concurrent=MAX_CONCURRENT,
+            ),
+            log=log,
+        )
+    return _agent_runner
 
 
 def run_agent_stream(
@@ -537,169 +540,12 @@ def run_agent_stream(
     on_text_delta: Callable[[str], None] | None = None,
     should_cancel: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
-    if len(prompt) > MAX_PROMPT_CHARS:
-        prompt = prompt[:MAX_PROMPT_CHARS] + "\n\n[truncated]"
-
-    if not _agent_slots.acquire(blocking=False):
-        raise RuntimeError(f"router busy: {MAX_CONCURRENT} agent runs already in flight")
-
-    cmd = [
-        AGENT_BIN,
-        "--print",
-        "--output-format",
-        "stream-json",
-        "--stream-partial-output",
-        "--mode",
-        "ask",
-        "--model",
+    return get_agent_runner().run(
         model,
-        "--trust",
-        "--workspace",
-        str(WORKSPACE),
-        "-p",
         prompt,
-    ]
-    t0 = time.time()
-    log("agent_start", model=model, prompt_chars=len(prompt), workspace=str(WORKSPACE))
-    proc: subprocess.Popen[str] | None = None
-    text_parts: list[str] = []
-    final_text = ""
-    usage: dict[str, Any] = {}
-    session_id = None
-    request_id = None
-    stderr_chunks: list[str] = []
-
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env=os.environ.copy(),
-            cwd=str(WORKSPACE),
-            start_new_session=True,
-        )
-        assert proc.stdout is not None
-        assert proc.stderr is not None
-
-        def _read_stderr() -> None:
-            try:
-                while True:
-                    chunk = proc.stderr.readline()
-                    if not chunk:
-                        break
-                    stderr_chunks.append(chunk)
-            except Exception:
-                pass
-
-        err_thread = threading.Thread(target=_read_stderr, daemon=True)
-        err_thread.start()
-
-        deadline = t0 + AGENT_TIMEOUT
-        while True:
-            if should_cancel and should_cancel():
-                _kill_proc(proc)
-                raise RuntimeError("client disconnected; agent cancelled")
-            if time.time() > deadline:
-                _kill_proc(proc)
-                raise RuntimeError(f"agent timed out after {AGENT_TIMEOUT}s")
-
-            line = proc.stdout.readline()
-            if not line:
-                if proc.poll() is not None:
-                    break
-                time.sleep(0.01)
-                continue
-
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(obj, dict):
-                continue
-
-            otype = obj.get("type")
-            if otype == "assistant":
-                delta = _assistant_delta_text(obj)
-                if delta:
-                    # Prefer incremental chunks; if a later event looks like full
-                    # replacement of the accumulated text, skip re-emitting.
-                    joined = "".join(text_parts)
-                    if joined and delta == joined:
-                        continue
-                    if joined and delta.startswith(joined) and len(delta) > len(joined):
-                        delta = delta[len(joined) :]
-                    if not delta:
-                        continue
-                    text_parts.append(delta)
-                    if on_text_delta:
-                        on_text_delta(delta)
-            elif otype == "result":
-                if obj.get("is_error"):
-                    err = obj.get("result") or obj.get("error") or "agent returned is_error"
-                    raise RuntimeError(str(err))
-                final_text = str(obj.get("result") or "")
-                usage = obj.get("usage") or {}
-                session_id = obj.get("session_id")
-                request_id = obj.get("request_id")
-
-        err_thread.join(timeout=2)
-        code = proc.wait(timeout=5)
-        duration_ms = int((time.time() - t0) * 1000)
-        stderr = "".join(stderr_chunks)
-
-        if code != 0 and not final_text and not text_parts:
-            log(
-                "agent_fail",
-                model=model,
-                code=code,
-                duration_ms=duration_ms,
-                stderr=stderr[-2000:],
-            )
-            raise RuntimeError(f"agent exited {code}: {(stderr)[-1500:]}")
-
-        text = final_text if final_text else "".join(text_parts)
-        log(
-            "agent_ok",
-            model=model,
-            duration_ms=duration_ms,
-            out_chars=len(text),
-            usage=usage,
-        )
-        return {
-            "text": text,
-            "usage": usage,
-            "session_id": session_id,
-            "request_id": request_id,
-            "duration_ms": duration_ms,
-        }
-    finally:
-        if proc is not None and proc.poll() is None:
-            _kill_proc(proc)
-        _agent_slots.release()
-
-
-def _kill_proc(proc: subprocess.Popen[str]) -> None:
-    try:
-        os.killpg(proc.pid, signal.SIGTERM)
-    except Exception:
-        try:
-            proc.terminate()
-        except Exception:
-            pass
-    try:
-        proc.wait(timeout=3)
-    except Exception:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except Exception:
-            try:
-                proc.kill()
-            except Exception:
-                pass
+        on_text_delta=on_text_delta,
+        should_cancel=should_cancel,
+    )
 
 
 def run_agent(model: str, prompt: str) -> dict[str, Any]:

@@ -21,6 +21,7 @@ def _isolate_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(router, "_api_key_cache", None)
     monkeypatch.setattr(router, "_models_cache", {"ts": 0.0, "ids": []})
     router.set_effort_map_store(None)
+    router.set_agent_runner(None)
 
 
 def test_peel_agent_model() -> None:
