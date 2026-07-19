@@ -2,11 +2,13 @@
 """OpenAI-compatible local router that fronts the Cursor agent CLI for Codex.
 
 Codex talks to http://127.0.0.1:18789/v1 (chat.completions + responses).
-Each completion is fulfilled by:
-  agent --print --mode ask --output-format stream-json --stream-partial-output \
-        --model <id> --trust --workspace <tmp> -p <prompt>
 
-Codex owns tools/sandbox; this router only returns assistant text from `agent`.
+Default (ask + tool bridge):
+  agent --print --mode ask …  →  plain text and/or <<<CODEX_TOOL_CALL>>> blocks
+  Router maps blocks to Responses API function_call items; Codex executes tools.
+
+Nested escape hatch (CURSOR_CODEX_ROUTER_NESTED_AGENT=1):
+  agent --print --force … in the project cwd; Cursor owns tools (bypasses Codex sandbox).
 """
 
 from __future__ import annotations
@@ -27,6 +29,15 @@ from typing import Any
 from urllib.parse import urlparse
 
 from . import paths as P
+from .model_identity import TO_CODEX as CURSOR_TO_CODEX_EFFORT
+from .model_identity import parse_agent_models, peel_agent_model
+from .tool_bridge import (
+    backend_system,
+    compact_tools,
+    extract_cwd,
+    format_tools_for_prompt,
+    parse_tool_calls,
+)
 
 HOST = P.host()
 PORT = P.port()
@@ -46,12 +57,8 @@ _log_lock = threading.Lock()
 _agent_slots = threading.BoundedSemaphore(MAX_CONCURRENT)
 _api_key_cache: str | None = None
 
-BACKEND_SYSTEM = (
-    "You are a pure language-model backend for OpenAI Codex CLI. "
-    "Codex owns tools, files, and shell. "
-    "Reply with only the next assistant message text. "
-    "Do not invent tool calls, XML, or function-call JSON."
-)
+# Back-compat alias for tests / older imports
+BACKEND_SYSTEM = backend_system(nested=False, bridge=False, has_tools=False)
 
 SKIP_INPUT_TYPES = {
     "function_call",
@@ -114,13 +121,7 @@ def list_models(force: bool = False) -> list[str]:
             env=os.environ.copy(),
         )
         out = (proc.stdout or "") + "\n" + (proc.stderr or "")
-        for line in out.splitlines():
-            line = line.strip()
-            if not line or line.lower().startswith("available models"):
-                continue
-            m = re.match(r"^([A-Za-z0-9._:-]+)\s*(?:-|—|$)", line)
-            if m:
-                ids.append(m.group(1))
+        ids = [mid for mid, _ in parse_agent_models(out)]
     except Exception as e:
         log("models_error", error=str(e))
     if not ids:
@@ -198,62 +199,12 @@ def extract_wants_fast(body: dict[str, Any] | None) -> bool:
     return False
 
 
-CURSOR_EFFORT_SUFFIXES = (
-    "extra-high",
-    "xhigh",
-    "ultra",
-    "max",
-    "high",
-    "medium",
-    "low",
-    "none",
-)
-
-# Cursor effort token -> Codex reasoning.effort label
-CURSOR_TO_CODEX_EFFORT = {
-    "none": "low",
-    "low": "low",
-    "medium": "medium",
-    "high": "high",
-    "extra-high": "xhigh",
-    "xhigh": "xhigh",
-    "max": "max",
-    "ultra": "ultra",
-}
-
 MODEL_SHORTS = {
     "grok": "cursor-grok-4.5",
     "grok-4.5": "cursor-grok-4.5",
     "composer": "composer-2.5",
     "composer-2": "composer-2.5",
 }
-
-
-def peel_agent_model(model: str) -> tuple[str, str | None, bool]:
-    """Split a concrete agent id into (catalog_slug, cursor_effort|None, fast)."""
-    wants_fast = model.endswith("-fast")
-    core = model[:-5] if wants_fast else model
-
-    if "-thinking-" in core:
-        base, rest = core.split("-thinking-", 1)
-        return f"{base}-thinking", (rest or None), wants_fast
-
-    for e in CURSOR_EFFORT_SUFFIXES:
-        suf = "-" + e
-        if core.endswith(suf):
-            return core[: -len(suf)], e, wants_fast
-
-    # legacy: ...-high-thinking
-    m = re.match(
-        r"^(?P<base>.+)-(?P<effort>none|low|medium|high|extra-high|xhigh|max|ultra)-thinking$",
-        core,
-    )
-    if m:
-        return f"{m.group('base')}-thinking", m.group("effort"), wants_fast
-    if core.endswith("-thinking"):
-        return core, None, wants_fast
-
-    return core, None, wants_fast
 
 
 def normalize_codex_effort(effort: str | None) -> str | None:
@@ -271,9 +222,7 @@ def normalize_codex_effort(effort: str | None) -> str | None:
     return eff
 
 
-def resolve_model(
-    model: str | None, body: dict[str, Any] | None = None
-) -> tuple[str, str]:
+def resolve_model(model: str | None, body: dict[str, Any] | None = None) -> tuple[str, str]:
     """Map Codex model + reasoning.effort (+fast) -> (echo_slug, agent_model_id).
 
     Important: echo_slug must stay a catalog base id (e.g. cursor-grok-4.5), never a
@@ -326,6 +275,7 @@ def resolve_model(
             return echo, agent
         hits = [k for k in known if k == slug or k.startswith(slug + "-")]
         if hits:
+
             def score(k: str) -> tuple:
                 return (0 if k.endswith("-fast") else 1, 2 if "-high" in k else 0, -len(k))
 
@@ -404,7 +354,11 @@ def content_to_text(content: Any) -> str:
                     if itype == "input_image":
                         parts.append("[image]")
                     else:
-                        parts.append(content_to_text(item.get("output") or item.get("content") or item.get("text")))
+                        parts.append(
+                            content_to_text(
+                                item.get("output") or item.get("content") or item.get("text")
+                            )
+                        )
                 elif "text" in item:
                     parts.append(str(item["text"]))
                 elif "content" in item:
@@ -418,15 +372,27 @@ def content_to_text(content: Any) -> str:
 def _looks_like_tool_schema_blob(text: str) -> bool:
     if len(text) < 2000:
         return False
-    markers = ("\"parameters\"", "\"type\": \"function\"", "\"type\":\"function\"", "tool_choice", "JSON schema")
+    markers = (
+        '"parameters"',
+        '"type": "function"',
+        '"type":"function"',
+        "tool_choice",
+        "JSON schema",
+    )
     hits = sum(1 for m in markers if m in text)
     return hits >= 2
 
 
-def messages_to_prompt(messages: list[dict[str, Any]], *, include_backend_system: bool = True) -> str:
+def messages_to_prompt(
+    messages: list[dict[str, Any]],
+    *,
+    include_backend_system: bool = True,
+    system_preamble: str | None = None,
+) -> str:
     chunks: list[str] = []
     if include_backend_system:
-        chunks.append(f"### SYSTEM\n{BACKEND_SYSTEM}")
+        preamble = system_preamble if system_preamble is not None else BACKEND_SYSTEM
+        chunks.append(f"### SYSTEM\n{preamble}")
     for msg in messages:
         role = str(msg.get("role") or "user").upper()
         if role in {"TOOL", "FUNCTION"}:
@@ -434,7 +400,10 @@ def messages_to_prompt(messages: list[dict[str, Any]], *, include_backend_system
         text = content_to_text(msg.get("content"))
         if not text:
             if msg.get("name"):
-                text = f"[name={msg.get('name')}] {content_to_text(msg.get('arguments') or msg.get('content'))}"
+                text = (
+                    f"[name={msg.get('name')}] "
+                    f"{content_to_text(msg.get('arguments') or msg.get('content'))}"
+                )
             else:
                 continue
         if role == "SYSTEM" and _looks_like_tool_schema_blob(text):
@@ -448,7 +417,15 @@ def messages_to_prompt(messages: list[dict[str, Any]], *, include_backend_system
     return "\n\n".join(chunks)
 
 
-def responses_input_to_prompt(body: dict[str, Any]) -> str:
+def responses_input_to_prompt(
+    body: dict[str, Any],
+    *,
+    nested: bool | None = None,
+    bridge: bool | None = None,
+    cwd: Path | None = None,
+) -> str:
+    nested = P.nested_agent_enabled() if nested is None else nested
+    bridge = P.tool_bridge_enabled() if bridge is None else bridge
     messages: list[dict[str, Any]] = []
     # Prefer Codex instructions; avoid duplicating huge tool catalogs.
     instructions = body.get("instructions")
@@ -491,14 +468,71 @@ def responses_input_to_prompt(body: dict[str, Any]) -> str:
     if isinstance(body.get("messages"), list):
         messages.extend(body["messages"])
 
-    # Never serialize body["tools"] — Codex executes tools itself.
-    tools = body.get("tools")
-    if tools:
-        log("prompt_ignore_tools", tool_count=len(tools) if isinstance(tools, list) else 1, skipped_input=skipped)
+    tools_raw = body.get("tools")
+    has_tools = bool(tools_raw)
+    compact = compact_tools(tools_raw) if has_tools and bridge and not nested else []
+    if has_tools and not compact and not nested:
+        log(
+            "prompt_ignore_tools",
+            tool_count=len(tools_raw) if isinstance(tools_raw, list) else 1,
+            skipped_input=skipped,
+            bridge=False,
+        )
+    elif compact:
+        log(
+            "prompt_bridge_tools",
+            tool_count=len(compact),
+            skipped_input=skipped,
+        )
     elif skipped:
         log("prompt_skip_input_items", skipped=skipped)
 
-    return messages_to_prompt(messages)
+    if cwd is not None:
+        messages.insert(
+            0,
+            {
+                "role": "system",
+                "content": f"Project working directory (Codex cwd): {cwd}",
+            },
+        )
+
+    preamble = backend_system(nested=nested, bridge=bridge, has_tools=bool(compact) or (nested and has_tools))
+    if compact:
+        preamble = f"{preamble}\n\n{format_tools_for_prompt(compact)}"
+
+    return messages_to_prompt(messages, system_preamble=preamble)
+
+
+def chat_messages_to_prompt(
+    messages: list[dict[str, Any]],
+    body: dict[str, Any],
+    *,
+    nested: bool | None = None,
+    bridge: bool | None = None,
+    cwd: Path | None = None,
+) -> str:
+    nested = P.nested_agent_enabled() if nested is None else nested
+    bridge = P.tool_bridge_enabled() if bridge is None else bridge
+    tools_raw = body.get("tools")
+    compact = compact_tools(tools_raw) if tools_raw and bridge and not nested else []
+    if tools_raw and not compact and not nested:
+        log(
+            "prompt_ignore_tools",
+            tool_count=len(tools_raw) if isinstance(tools_raw, list) else 1,
+            api="chat",
+            bridge=False,
+        )
+    elif compact:
+        log("prompt_bridge_tools", tool_count=len(compact), api="chat")
+
+    msgs = list(messages)
+    if cwd is not None:
+        msgs = [{"role": "system", "content": f"Project working directory (Codex cwd): {cwd}"}] + msgs
+
+    preamble = backend_system(nested=nested, bridge=bridge, has_tools=bool(compact))
+    if compact:
+        preamble = f"{preamble}\n\n{format_tools_for_prompt(compact)}"
+    return messages_to_prompt(msgs, system_preamble=preamble)
 
 
 def _assistant_delta_text(obj: dict[str, Any]) -> str:
@@ -697,10 +731,7 @@ def run_agent(model: str, prompt: str) -> dict[str, Any]:
 
 def usage_to_openai(usage: dict[str, Any]) -> dict[str, int]:
     prompt = int(
-        usage.get("inputTokens")
-        or usage.get("input_tokens")
-        or usage.get("prompt_tokens")
-        or 0
+        usage.get("inputTokens") or usage.get("input_tokens") or usage.get("prompt_tokens") or 0
     )
     completion = int(
         usage.get("outputTokens")
@@ -1035,9 +1066,7 @@ class Handler(BaseHTTPRequestHandler):
             payload = {**payload, "type": event_type, "sequence_number": seq}
             try:
                 self.wfile.write(f"event: {event_type}\n".encode())
-                self.wfile.write(
-                    f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode()
-                )
+                self.wfile.write(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode())
                 self.wfile.flush()
             except Exception:
                 self._client_disconnected = True  # type: ignore[attr-defined]

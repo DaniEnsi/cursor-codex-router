@@ -5,6 +5,7 @@ Groups Cursor's effort-suffixed ids into base models with
 supported_reasoning_levels so Codex /model shows reasoning pickers
 instead of listing every low/medium/high variant separately.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -16,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import paths as P
+from .model_identity import TO_CODEX, parse_agent_models, split_model
 
 # Bump when catalog shape changes so Codex Desktop/app-server drops stale cache.
 CATALOG_ETAG_PREFIX = "cursor-local-catalog-grouped-v8"
@@ -37,32 +39,8 @@ def _cache() -> Path:
     return P.codex_models_cache_path()
 
 
-# Cursor effort tokens (longest first)
-CURSOR_EFFORTS = (
-    "extra-high",
-    "xhigh",
-    "ultra",
-    "max",
-    "high",
-    "medium",
-    "low",
-    "none",
-)
-
 # Codex-supported effort labels we expose in the catalog
 CODEX_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max", "ultra")
-
-# Cursor effort -> Codex effort shown in /model
-TO_CODEX = {
-    "none": "low",          # Codex has no 'none'; closest
-    "low": "low",
-    "medium": "medium",
-    "high": "high",
-    "extra-high": "xhigh",
-    "xhigh": "xhigh",
-    "max": "max",
-    "ultra": "ultra",
-}
 
 EFFORT_DESC = {
     "minimal": "Fastest / minimal reasoning",
@@ -76,47 +54,6 @@ EFFORT_DESC = {
 
 # Preferred default effort when multiple exist
 DEFAULT_PREFERENCE = ["high", "medium", "xhigh", "max", "low", "extra-high", "none", "ultra"]
-
-
-def parse_agent_models(text: str) -> list[tuple[str, str]]:
-    rows: list[tuple[str, str]] = []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or " - " not in line:
-            continue
-        if line.lower().startswith("available models"):
-            continue
-        mid, _, name = line.partition(" - ")
-        mid = mid.strip()
-        name = re.sub(r"\s*\((current|default)\)\s*$", "", name.strip(), flags=re.I).strip()
-        if mid:
-            rows.append((mid, name or mid))
-    return rows
-
-
-def split_model(mid: str) -> tuple[str, bool, str | None, bool]:
-    """Return (base_slug, thinking, cursor_effort|None, fast)."""
-    fast = mid.endswith("-fast")
-    core = mid[:-5] if fast else mid
-
-    if "-thinking-" in core:
-        base, effort = core.split("-thinking-", 1)
-        return base, True, effort or None, fast
-
-    for e in CURSOR_EFFORTS:
-        suf = "-" + e
-        if core.endswith(suf):
-            return core[: -len(suf)], False, e, fast
-
-    # Odd legacy names like claude-4.5-opus-high-thinking (thinking as suffix word)
-    m = re.match(r"^(?P<base>.+)-(?P<effort>none|low|medium|high|extra-high|xhigh|max|ultra)-thinking$", core)
-    if m:
-        return m.group("base"), True, m.group("effort"), fast
-    m = re.match(r"^(?P<base>.+)-thinking$", core)
-    if m:
-        return m.group("base"), True, None, fast
-
-    return core, False, None, fast
 
 
 _EFFORT_WORD_RE = re.compile(
@@ -319,7 +256,9 @@ def nice_display(base: str, thinking: bool, sample_name: str) -> str:
         "Kimi ",
         "Auto",
     )
-    if sample and any(sample.startswith(p) or sample.upper().startswith(p.upper()) for p in brand_prefixes):
+    if sample and any(
+        sample.startswith(p) or sample.upper().startswith(p.upper()) for p in brand_prefixes
+    ):
         # Keep sample when it already includes our brand and isn't effort-dirty.
         cand = _strip_effort_words(sample)
         cand = _strip_display_markers(cand)
@@ -534,7 +473,9 @@ def build() -> tuple[list[dict], dict]:
         variants = g["variants"]
 
         # Build codex_effort -> agent ids
-        by_codex: dict[str, dict[str, str | None]] = defaultdict(lambda: {"normal": None, "fast": None})
+        by_codex: dict[str, dict[str, str | None]] = defaultdict(
+            lambda: {"normal": None, "fast": None}
+        )
         bare_normal = None
         bare_fast = None
         cursor_efforts_present = set()
@@ -661,9 +602,7 @@ def assert_clean_catalog(models: list[dict]) -> None:
         r"\b(None|Low|Medium|High|Extra[\s-]?High|XHigh|Max|Ultra|Minimal|Fast)\b",
         re.I,
     )
-    suffix_re = re.compile(
-        r"-(?:none|low|medium|high|extra-high|xhigh|max|ultra|minimal|fast)$"
-    )
+    suffix_re = re.compile(r"-(?:none|low|medium|high|extra-high|xhigh|max|ultra|minimal|fast)$")
     bare_ver = re.compile(r"^[\d.]+$", re.I)
     thinking_label = re.compile(r"\bThinking\b", re.I)
     no_zdr_label = re.compile(r"NO\s+ZDR", re.I)
@@ -701,10 +640,16 @@ def assert_clean_catalog(models: list[dict]) -> None:
 def write_models_cache(models: list[dict], fetched_at: str) -> str:
     """Refresh ~/.codex/models_cache.json with a new etag so app-server picks it up."""
     payload_for_hash = json.dumps(
-        [{"slug": m["slug"], "display_name": m["display_name"],
-          "levels": m.get("supported_reasoning_levels"),
-          "tiers": m.get("service_tiers"),
-          "speed": m.get("additional_speed_tiers")} for m in models],
+        [
+            {
+                "slug": m["slug"],
+                "display_name": m["display_name"],
+                "levels": m.get("supported_reasoning_levels"),
+                "tiers": m.get("service_tiers"),
+                "speed": m.get("additional_speed_tiers"),
+            }
+            for m in models
+        ],
         sort_keys=True,
         separators=(",", ":"),
     )
@@ -725,7 +670,9 @@ def write_models_cache(models: list[dict], fetched_at: str) -> str:
     except Exception:
         pass
     cache = {
-        "fetched_at": ts if ts.endswith("Z") else datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        "fetched_at": ts
+        if ts.endswith("Z")
+        else datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
         "etag": etag,
         "client_version": client_version,
         "models": models,
