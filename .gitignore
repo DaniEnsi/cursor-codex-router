@@ -20,6 +20,7 @@ venv/
 .coverage
 htmlcov/
 .mypy_cache/
+uv.lock
 
 # IDE
 .idea/

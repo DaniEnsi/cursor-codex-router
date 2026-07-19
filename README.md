@@ -33,8 +33,8 @@ cursor-codex-router setup
 ### uv / pipx
 
 ```bash
-uv tool install git+https://github.com/DaniEnsi/cursor-codex-router.git
-# or: pipx install git+https://github.com/DaniEnsi/cursor-codex-router.git
+uv tool install git+https://github.com/DaniEnsi/cursor-codex-router.git@v1.0.0
+# or: pipx install git+https://github.com/DaniEnsi/cursor-codex-router.git@v1.0.0
 cursor-codex-router setup
 ```
 
@@ -122,6 +122,8 @@ Bind defaults to **localhost only** (`127.0.0.1:18789`). Do not expose this on a
 | `CURSOR_CODEX_ROUTER_DEFAULT_MODEL` | `auto` | Fallback model |
 | `CURSOR_CODEX_ROUTER_TIMEOUT` | `600` | Agent timeout (seconds) |
 | `CURSOR_CODEX_ROUTER_MAX_CONCURRENT` | `3` | Concurrent agent runs |
+| `CURSOR_CODEX_ROUTER_MAX_PROMPT` | `200000` | Max prompt characters before truncation |
+| `CURSOR_CODEX_ROUTER_MODELS_TTL` | `300` | Model list cache TTL (seconds) |
 | `CURSOR_AGENT_BIN` | `~/.local/bin/agent` | Agent binary |
 
 ## Model catalog
