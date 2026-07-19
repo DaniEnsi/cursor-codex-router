@@ -1,15 +1,21 @@
 # cursor-codex-router
 
-OpenAI-compatible local proxy that lets **OpenAI Codex** (CLI / Desktop) use **Cursor Agent** models.
+> **Archived.** This project did not work properly with **tool use**. Routing completions through the Cursor agent CLI was fine for plain text, but bridging Codex tools (sandbox / function calls) never worked reliably enough to keep using. The repo is kept for reference only — do not install for real workflows.
 
-Codex talks to `http://127.0.0.1:18789/v1`. Each completion is fulfilled by:
+OpenAI-compatible local proxy that let **OpenAI Codex** (CLI / Desktop) call **Cursor Agent** models for completions.
+
+Codex talked to `http://127.0.0.1:18789/v1`. Each completion was fulfilled by something like:
 
 ```bash
 agent --print --mode ask --output-format stream-json --stream-partial-output \
   --model <id> --trust --workspace <tmp> -p <prompt>
 ```
 
-Codex owns tools and sandbox; this router only returns assistant text.
+What worked: model list + streamed assistant text from Cursor models.
+
+What did not: reliable tool use / function-call bridging so Codex could keep owning tools while the model lived behind Cursor.
+
+---
 
 ## Requirements
 
