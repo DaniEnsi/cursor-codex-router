@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cursor-codex-router"
-version = "1.0.0"
+version = "1.0.1"
 description = "OpenAI-compatible local router that fronts the Cursor agent CLI for Codex"
 readme = "README.md"
 license = "MIT"

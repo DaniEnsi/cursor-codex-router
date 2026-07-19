@@ -33,8 +33,8 @@ cursor-codex-router setup
 ### uv / pipx
 
 ```bash
-uv tool install git+https://github.com/DaniEnsi/cursor-codex-router.git@v1.0.0
-# or: pipx install git+https://github.com/DaniEnsi/cursor-codex-router.git@v1.0.0
+uv tool install git+https://github.com/DaniEnsi/cursor-codex-router.git@v1.0.1
+# or: pipx install git+https://github.com/DaniEnsi/cursor-codex-router.git@v1.0.1
 cursor-codex-router setup
 ```
 

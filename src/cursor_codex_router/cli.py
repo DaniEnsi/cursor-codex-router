@@ -304,15 +304,15 @@ def _stop_pidfile() -> int:
 
 def cmd_start(args: argparse.Namespace) -> int:
     _ensure_api_key()
-    if args.foreground:
+    if getattr(args, "foreground", False):
         return cmd_serve(args)
-    if _have_systemd() and P.systemd_unit_path().exists() and not args.no_systemd:
+    if _have_systemd() and P.systemd_unit_path().exists() and not getattr(args, "no_systemd", False):
         return _start_systemd()
     return _start_pidfile()
 
 
 def cmd_stop(args: argparse.Namespace) -> int:
-    if _have_systemd() and P.systemd_unit_path().exists() and not args.no_systemd:
+    if _have_systemd() and P.systemd_unit_path().exists() and not getattr(args, "no_systemd", False):
         return _stop_systemd()
     return _stop_pidfile()
 
@@ -320,6 +320,11 @@ def cmd_stop(args: argparse.Namespace) -> int:
 def cmd_restart(args: argparse.Namespace) -> int:
     cmd_stop(args)
     time.sleep(0.5)
+    # restart reuses start; ensure flags start expects are present
+    if not hasattr(args, "foreground"):
+        args.foreground = False
+    if not hasattr(args, "no_systemd"):
+        args.no_systemd = False
     return cmd_start(args)
 
 
