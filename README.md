@@ -20,25 +20,33 @@ Codex owns tools and sandbox; this router only returns assistant text.
 
 ## Install
 
-```bash
-# recommended
-uv tool install git+https://github.com/DaniEnsi/cursor-codex-router.git
-
-# or with pip
-pip install git+https://github.com/DaniEnsi/cursor-codex-router.git
-
-# or from a clone
-uv tool install -e .
-# pip install -e .
-```
-
-Then run setup (starts the router in the background):
+### Homebrew (recommended)
 
 ```bash
+brew tap DaniEnsi/tap
+# Homebrew 6+: trust the tap once
+brew trust DaniEnsi/tap
+brew install cursor-codex-router
 cursor-codex-router setup
 ```
 
-This will:
+### uv / pipx
+
+```bash
+uv tool install git+https://github.com/DaniEnsi/cursor-codex-router.git
+# or: pipx install git+https://github.com/DaniEnsi/cursor-codex-router.git
+cursor-codex-router setup
+```
+
+### From a clone
+
+```bash
+uv tool install -e .
+# or: pip install -e .
+cursor-codex-router setup
+```
+
+`setup` will:
 
 1. Create `~/.local/share/cursor-codex-router/` and a local API key
 2. Sync the grouped model catalog from `agent models`
