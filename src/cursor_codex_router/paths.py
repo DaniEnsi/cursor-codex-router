@@ -1,112 +1,116 @@
-"""Shared paths and environment configuration."""
+"""Live path/env getters — thin adapters over :mod:`config`.
+
+Kept for existing call sites (CLI, catalog). Prefer ``get_config()`` for new code.
+"""
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
+
+from .config import get_config
 
 
 def env(name: str, default: str) -> str:
+    import os
+
     return os.environ.get(name, default)
 
 
 def state_dir() -> Path:
-    return Path(
-        env(
-            "CURSOR_CODEX_ROUTER_STATE",
-            str(Path.home() / ".local/share/cursor-codex-router"),
-        )
-    )
+    return get_config().state_dir
 
 
 def workspace_dir() -> Path:
-    return Path(
-        env(
-            "CURSOR_CODEX_ROUTER_WORKSPACE",
-            "/tmp/cursor-codex-router-ws",
-        )
-    )
+    return get_config().workspace
 
 
 def agent_bin() -> str:
-    return env("CURSOR_AGENT_BIN", str(Path.home() / ".local/bin/agent"))
+    return get_config().agent_bin
 
 
 def host() -> str:
-    return env("CURSOR_CODEX_ROUTER_HOST", "127.0.0.1")
+    return get_config().host
 
 
 def port() -> int:
-    return int(env("CURSOR_CODEX_ROUTER_PORT", "18789"))
+    return get_config().port
 
 
 def default_model() -> str:
-    return env("CURSOR_CODEX_ROUTER_DEFAULT_MODEL", "auto")
+    return get_config().default_model
 
 
 def agent_timeout() -> int:
-    return int(env("CURSOR_CODEX_ROUTER_TIMEOUT", "600"))
+    return get_config().agent_timeout
 
 
 def max_prompt_chars() -> int:
-    return int(env("CURSOR_CODEX_ROUTER_MAX_PROMPT", "200000"))
+    return get_config().max_prompt_chars
 
 
 def models_cache_ttl() -> int:
-    return int(env("CURSOR_CODEX_ROUTER_MODELS_TTL", "300"))
+    return get_config().models_cache_ttl
 
 
 def max_concurrent() -> int:
-    return int(env("CURSOR_CODEX_ROUTER_MAX_CONCURRENT", "3"))
+    return get_config().max_concurrent
+
+
+def nested_agent_enabled() -> bool:
+    return get_config().nested_agent
+
+
+def tool_bridge_enabled() -> bool:
+    return get_config().tool_bridge
 
 
 def api_key_path() -> Path:
-    return state_dir() / "api_key"
+    return get_config().api_key_path
 
 
 def log_path() -> Path:
-    return state_dir() / "router.log"
+    return get_config().log_path
 
 
 def service_log_path() -> Path:
-    return state_dir() / "service.log"
+    return get_config().service_log_path
 
 
 def pid_path() -> Path:
-    return state_dir() / "router.pid"
+    return get_config().pid_path
 
 
 def catalog_path() -> Path:
-    return state_dir() / "model_catalog.json"
+    return get_config().catalog_path
 
 
 def effort_map_path() -> Path:
-    return state_dir() / "model_effort_map.json"
+    return get_config().effort_map_path
 
 
 def codex_dir() -> Path:
-    return Path.home() / ".codex"
+    return get_config().codex_dir
 
 
 def codex_config_path() -> Path:
-    return codex_dir() / "config.toml"
+    return get_config().codex_config_path
 
 
 def codex_auth_path() -> Path:
-    return codex_dir() / "auth.json"
+    return get_config().codex_auth_path
 
 
 def codex_models_cache_path() -> Path:
-    return codex_dir() / "models_cache.json"
+    return get_config().codex_models_cache_path
 
 
 def systemd_user_dir() -> Path:
-    return Path.home() / ".config/systemd/user"
+    return get_config().systemd_user_dir
 
 
 def systemd_unit_path() -> Path:
-    return systemd_user_dir() / "cursor-codex-router.service"
+    return get_config().systemd_unit_path
 
 
 def base_url() -> str:
-    return f"http://{host()}:{port()}/v1"
+    return get_config().base_url

@@ -7,21 +7,35 @@ from pathlib import Path
 import pytest
 
 from cursor_codex_router import router
+from cursor_codex_router.config import Config, set_config
+
+
+def _test_config(tmp_path: Path) -> Config:
+    return Config(
+        host="127.0.0.1",
+        port=18789,
+        state_dir=tmp_path / "state",
+        workspace=tmp_path / "ws",
+        agent_bin="agent",
+        default_model="auto",
+        agent_timeout=600,
+        max_prompt_chars=200000,
+        models_cache_ttl=300,
+        max_concurrent=3,
+        nested_agent=False,
+        tool_bridge=True,
+    )
 
 
 @pytest.fixture(autouse=True)
 def _isolate_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("CURSOR_CODEX_ROUTER_STATE", str(tmp_path / "state"))
-    monkeypatch.setenv("CURSOR_CODEX_ROUTER_WORKSPACE", str(tmp_path / "ws"))
-    # Reload path-derived module globals used by router
-    monkeypatch.setattr(router, "STATE_DIR", tmp_path / "state")
-    monkeypatch.setattr(router, "KEY_PATH", tmp_path / "state" / "api_key")
-    monkeypatch.setattr(router, "LOG_PATH", tmp_path / "state" / "router.log")
-    monkeypatch.setattr(router, "WORKSPACE", tmp_path / "ws")
+    set_config(_test_config(tmp_path))
     monkeypatch.setattr(router, "_api_key_cache", None)
     monkeypatch.setattr(router, "_models_cache", {"ts": 0.0, "ids": []})
     router.set_effort_map_store(None)
     router.set_agent_runner(None)
+    yield
+    set_config(None)
 
 
 def test_peel_agent_model() -> None:
@@ -34,7 +48,7 @@ def test_peel_agent_model() -> None:
     )
 
 
-def test_resolve_model_uses_effort_map(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resolve_model_uses_effort_map(monkeypatch: pytest.MonkeyPatch) -> None:
     from cursor_codex_router.effort_map import (
         EffortMap,
         EffortSlot,
@@ -97,11 +111,12 @@ def test_messages_strip_tool_schema() -> None:
             {"role": "user", "content": "hi"},
         ]
     )
-    assert "hi" in prompt
     assert "parameters" not in prompt
+    assert "### USER" in prompt
+    assert "hi" in prompt
 
 
-def test_ensure_state_creates_key(tmp_path: Path) -> None:
+def test_ensure_state_creates_key() -> None:
     key = router.ensure_state()
     assert len(key) > 20
     assert router.KEY_PATH.exists()

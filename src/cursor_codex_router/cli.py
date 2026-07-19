@@ -78,7 +78,9 @@ def _which(name: str) -> str | None:
     return shutil.which(name)
 
 
-def _run(cmd: list[str], *, check: bool = True, capture: bool = False) -> subprocess.CompletedProcess[str]:
+def _run(
+    cmd: list[str], *, check: bool = True, capture: bool = False
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         cmd,
         check=check,
@@ -172,7 +174,7 @@ def _configure_codex(api_key: str, *, merge: bool = True) -> None:
         print(f"updated managed block in {cfg}")
         return
 
-    if merge and 'model_providers.cursor' in text:
+    if merge and "model_providers.cursor" in text:
         print(
             f"note: {cfg} already has [model_providers.cursor]; "
             "leaving it alone. Re-run with --force-codex-config to replace."
@@ -306,13 +308,21 @@ def cmd_start(args: argparse.Namespace) -> int:
     _ensure_api_key()
     if getattr(args, "foreground", False):
         return cmd_serve(args)
-    if _have_systemd() and P.systemd_unit_path().exists() and not getattr(args, "no_systemd", False):
+    if (
+        _have_systemd()
+        and P.systemd_unit_path().exists()
+        and not getattr(args, "no_systemd", False)
+    ):
         return _start_systemd()
     return _start_pidfile()
 
 
 def cmd_stop(args: argparse.Namespace) -> int:
-    if _have_systemd() and P.systemd_unit_path().exists() and not getattr(args, "no_systemd", False):
+    if (
+        _have_systemd()
+        and P.systemd_unit_path().exists()
+        and not getattr(args, "no_systemd", False)
+    ):
         return _stop_systemd()
     return _stop_pidfile()
 
@@ -364,12 +374,15 @@ def cmd_status(_args: argparse.Namespace) -> int:
 def cmd_setup(args: argparse.Namespace) -> int:
     print(f"setting up cursor-codex-router {__version__}")
 
+    from .config import set_config
+
     agent = Path(P.agent_bin())
     if not agent.is_file():
         # try PATH
         found = _which("agent")
         if found:
             os.environ["CURSOR_AGENT_BIN"] = found
+            set_config(None)  # reload live Config after env mutation
             agent = Path(found)
         else:
             print(
@@ -446,8 +459,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = p.add_subparsers(dest="command", required=True)
 
-    setup = sub.add_parser("setup", help="Install, configure Codex, sync catalog, start in background")
-    setup.add_argument("--skip-codex-config", action="store_true", help="Do not write ~/.codex/config.toml")
+    setup = sub.add_parser(
+        "setup", help="Install, configure Codex, sync catalog, start in background"
+    )
+    setup.add_argument(
+        "--skip-codex-config", action="store_true", help="Do not write ~/.codex/config.toml"
+    )
     setup.add_argument(
         "--force-codex-config",
         action="store_true",

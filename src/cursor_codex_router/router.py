@@ -26,8 +26,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from . import paths as P
 from .agent_runner import AgentRunner, AgentRunnerConfig, FakeAgentRunner
+from .config import get_config
 from .effort_map import EffortMap, FileEffortMapStore, MemoryEffortMapStore
 from .model_identity import TO_CODEX as CURSOR_TO_CODEX_EFFORT
 from .model_identity import parse_agent_models, peel_agent_model
@@ -36,19 +36,6 @@ from .tool_bridge import (
     compact_tools,
     format_tools_for_prompt,
 )
-
-HOST = P.host()
-PORT = P.port()
-STATE_DIR = P.state_dir()
-LOG_PATH = P.log_path()
-KEY_PATH = P.api_key_path()
-AGENT_BIN = P.agent_bin()
-DEFAULT_MODEL = P.default_model()
-AGENT_TIMEOUT = P.agent_timeout()
-MAX_PROMPT_CHARS = P.max_prompt_chars()
-MODELS_CACHE_TTL = P.models_cache_ttl()
-MAX_CONCURRENT = P.max_concurrent()
-WORKSPACE = P.workspace_dir()
 
 _models_cache: dict[str, Any] = {"ts": 0.0, "ids": []}
 _log_lock = threading.Lock()
@@ -73,15 +60,38 @@ SKIP_INPUT_TYPES = {
 }
 
 
+def __getattr__(name: str) -> Any:
+    """Live module attrs so HOST/KEY_PATH/… track get_config() (no import freeze)."""
+    cfg = get_config()
+    mapping = {
+        "HOST": cfg.host,
+        "PORT": cfg.port,
+        "STATE_DIR": cfg.state_dir,
+        "LOG_PATH": cfg.log_path,
+        "KEY_PATH": cfg.api_key_path,
+        "AGENT_BIN": cfg.agent_bin,
+        "DEFAULT_MODEL": cfg.default_model,
+        "AGENT_TIMEOUT": cfg.agent_timeout,
+        "MAX_PROMPT_CHARS": cfg.max_prompt_chars,
+        "MODELS_CACHE_TTL": cfg.models_cache_ttl,
+        "MAX_CONCURRENT": cfg.max_concurrent,
+        "WORKSPACE": cfg.workspace,
+    }
+    if name in mapping:
+        return mapping[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 def ensure_state() -> str:
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    WORKSPACE.mkdir(parents=True, exist_ok=True)
-    if not KEY_PATH.exists():
+    cfg = get_config()
+    cfg.state_dir.mkdir(parents=True, exist_ok=True)
+    cfg.workspace.mkdir(parents=True, exist_ok=True)
+    if not cfg.api_key_path.exists():
         import secrets
 
-        KEY_PATH.write_text(secrets.token_urlsafe(32) + "\n")
-        KEY_PATH.chmod(0o600)
-    return KEY_PATH.read_text().strip()
+        cfg.api_key_path.write_text(secrets.token_urlsafe(32) + "\n")
+        cfg.api_key_path.chmod(0o600)
+    return cfg.api_key_path.read_text().strip()
 
 
 def get_api_key() -> str:
@@ -98,20 +108,22 @@ def log(msg: str, **extra: Any) -> None:
         **extra,
     }
     text = json.dumps(line, ensure_ascii=False)
+    log_path = get_config().log_path
     with _log_lock:
-        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with LOG_PATH.open("a", encoding="utf-8") as f:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as f:
             f.write(text + "\n")
 
 
 def list_models(force: bool = False) -> list[str]:
+    cfg = get_config()
     now = time.time()
-    if not force and _models_cache["ids"] and now - _models_cache["ts"] < MODELS_CACHE_TTL:
+    if not force and _models_cache["ids"] and now - _models_cache["ts"] < cfg.models_cache_ttl:
         return list(_models_cache["ids"])
     ids: list[str] = []
     try:
         proc = subprocess.run(
-            [AGENT_BIN, "models"],
+            [cfg.agent_bin, "models"],
             capture_output=True,
             text=True,
             timeout=60,
@@ -122,7 +134,7 @@ def list_models(force: bool = False) -> list[str]:
     except Exception as e:
         log("models_error", error=str(e))
     if not ids:
-        ids = [DEFAULT_MODEL]
+        ids = [cfg.default_model]
     seen: set[str] = set()
     uniq: list[str] = []
     for i in ids:
@@ -156,7 +168,7 @@ def set_effort_map_store(store: FileEffortMapStore | MemoryEffortMapStore | None
 def _get_effort_store() -> FileEffortMapStore | MemoryEffortMapStore:
     global _effort_store
     if _effort_store is None:
-        _effort_store = FileEffortMapStore(P.effort_map_path())
+        _effort_store = FileEffortMapStore(get_config().effort_map_path())
     return _effort_store
 
 
@@ -226,7 +238,7 @@ def resolve_model(model: str | None, body: dict[str, Any] | None = None) -> tupl
     """
     raw = model
     if not model or model in ("default", "openai"):
-        model = DEFAULT_MODEL
+        model = get_config().default_model
     model = str(model).split("/", 1)[-1].strip()
 
     known = list_models()
@@ -285,7 +297,7 @@ def resolve_model(model: str | None, body: dict[str, Any] | None = None) -> tupl
     resolved = emap.pick_agent(slug, effort, wants_fast)
     eff = effort or info.default_effort or "high"
     if not resolved:
-        resolved = slug if slug in known_set else DEFAULT_MODEL
+        resolved = slug if slug in known_set else get_config().default_model
 
     log(
         "model_resolve",
@@ -396,8 +408,8 @@ def responses_input_to_prompt(
     bridge: bool | None = None,
     cwd: Path | None = None,
 ) -> str:
-    nested = P.nested_agent_enabled() if nested is None else nested
-    bridge = P.tool_bridge_enabled() if bridge is None else bridge
+    nested = get_config().nested_agent if nested is None else nested
+    bridge = get_config().tool_bridge if bridge is None else bridge
     messages: list[dict[str, Any]] = []
     # Prefer Codex instructions; avoid duplicating huge tool catalogs.
     instructions = body.get("instructions")
@@ -485,8 +497,8 @@ def chat_messages_to_prompt(
     bridge: bool | None = None,
     cwd: Path | None = None,
 ) -> str:
-    nested = P.nested_agent_enabled() if nested is None else nested
-    bridge = P.tool_bridge_enabled() if bridge is None else bridge
+    nested = get_config().nested_agent if nested is None else nested
+    bridge = get_config().tool_bridge if bridge is None else bridge
     tools_raw = body.get("tools")
     compact = compact_tools(tools_raw) if tools_raw and bridge and not nested else []
     if tools_raw and not compact and not nested:
@@ -520,13 +532,14 @@ def set_agent_runner(runner: AgentRunner | FakeAgentRunner | None) -> None:
 def get_agent_runner() -> AgentRunner | FakeAgentRunner:
     global _agent_runner
     if _agent_runner is None:
+        cfg = get_config()
         _agent_runner = AgentRunner(
             AgentRunnerConfig(
-                agent_bin=AGENT_BIN,
-                workspace=WORKSPACE,
-                timeout=float(AGENT_TIMEOUT),
-                max_prompt_chars=MAX_PROMPT_CHARS,
-                max_concurrent=MAX_CONCURRENT,
+                agent_bin=cfg.agent_bin,
+                workspace=cfg.workspace,
+                timeout=float(cfg.agent_timeout),
+                max_prompt_chars=cfg.max_prompt_chars,
+                max_concurrent=cfg.max_concurrent,
             ),
             log=log,
         )
@@ -672,15 +685,16 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         path = urlparse(self.path).path.rstrip("/") or "/"
         if path in ("/healthz", "/health", "/"):
+            cfg = get_config()
             self._send(
                 200,
                 {
                     "status": "ok",
                     "service": "cursor-codex-router",
-                    "agent": AGENT_BIN,
-                    "default_model": DEFAULT_MODEL,
-                    "workspace": str(WORKSPACE),
-                    "max_concurrent": MAX_CONCURRENT,
+                    "agent": cfg.agent_bin,
+                    "default_model": cfg.default_model,
+                    "workspace": str(cfg.workspace),
+                    "max_concurrent": cfg.max_concurrent,
                 },
             )
             return
@@ -993,15 +1007,16 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    WORKSPACE.mkdir(parents=True, exist_ok=True)
+    cfg = get_config()
+    cfg.workspace.mkdir(parents=True, exist_ok=True)
     log(
         "starting",
-        host=HOST,
-        port=PORT,
-        agent=AGENT_BIN,
-        default_model=DEFAULT_MODEL,
-        workspace=str(WORKSPACE),
-        max_concurrent=MAX_CONCURRENT,
+        host=cfg.host,
+        port=cfg.port,
+        agent=cfg.agent_bin,
+        default_model=cfg.default_model,
+        workspace=str(cfg.workspace),
+        max_concurrent=cfg.max_concurrent,
     )
     try:
         ms = list_models(force=True)
@@ -1010,10 +1025,10 @@ def main() -> None:
     except Exception as e:
         log("models_warm_fail", error=str(e))
 
-    httpd = ThreadingHTTPServer((HOST, PORT), Handler)
+    httpd = ThreadingHTTPServer((cfg.host, cfg.port), Handler)
     print(
-        f"cursor-codex-router listening on http://{HOST}:{PORT}/v1 "
-        f"(agent={AGENT_BIN}, workspace={WORKSPACE}, models={len(_models_cache['ids'])})",
+        f"cursor-codex-router listening on http://{cfg.host}:{cfg.port}/v1 "
+        f"(agent={cfg.agent_bin}, workspace={cfg.workspace}, models={len(_models_cache['ids'])})",
         flush=True,
     )
     try:
